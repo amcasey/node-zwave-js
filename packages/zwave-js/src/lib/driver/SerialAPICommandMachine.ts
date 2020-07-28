@@ -7,11 +7,11 @@ import { MessageType } from "../message/Constants";
 import type { Message } from "../message/Message";
 import {
 	isMultiStageCallback,
-	isSuccessIndicator,
+	isSuccessIndicator
 } from "../message/SuccessIndicator";
 import {
 	respondUnexpected,
-	ServiceImplementations,
+	ServiceImplementations
 } from "./StateMachineShared";
 
 /* eslint-disable @typescript-eslint/ban-types */
@@ -57,41 +57,35 @@ export type SerialAPICommandEvent =
 	| { type: "ACK" }
 	| { type: "CAN" }
 	| { type: "NAK" }
-	| {
-			type:
-				| "response" // A message that has been determined to be expected
-				| "callback"
-				// A message that might be unexpected
-				| "message"
-				// A message that IS unexpected
-				| "serialAPIUnexpected";
-			message: Message;
-	  };
+	| { type: "response", message: Message } // A message that has been determined to be expected
+	| { type: "callback", message: Message }
+	| { type: "message", message: Message } // A message that might be unexpected
+	| { type: "serialAPIUnexpected", message: Message }; // A message that IS unexpected
 
 export type SerialAPICommandDoneData =
 	| {
-			type: "success";
-			txTimestamp: number;
-			result: Message;
-	  }
+		type: "success";
+		txTimestamp: number;
+		result: Message;
+	}
 	| ({
-			type: "failure";
-	  } & (
+		type: "failure";
+	} & (
 			| {
-					reason:
-						| "send failure"
-						| "CAN"
-						| "NAK"
-						| "ACK timeout"
-						| "response timeout"
-						| "callback timeout";
-					result?: undefined;
-			  }
+				reason:
+				| "send failure"
+				| "CAN"
+				| "NAK"
+				| "ACK timeout"
+				| "response timeout"
+				| "callback timeout";
+				result?: undefined;
+			}
 			| {
-					reason: "response NOK" | "callback NOK";
-					result: Message;
-			  }
-	  ));
+				reason: "response NOK" | "callback NOK";
+				result: Message;
+			}
+		));
 
 function computeRetryDelay(ctx: SerialAPICommandContext): number {
 	return 100 + 1000 * (ctx.attempts - 1);
@@ -334,8 +328,8 @@ export function createSerialAPICommandMachine(
 					meta.state.matches("waitForResponse")
 						? ctx.msg.isExpectedResponse((evt as any).message)
 						: meta.state.matches("waitForCallback")
-						? ctx.msg.isExpectedCallback((evt as any).message)
-						: false,
+							? ctx.msg.isExpectedCallback((evt as any).message)
+							: false,
 				responseIsNOK: (ctx, evt) =>
 					evt.type === "response" &&
 					// assume responses without success indication to be OK

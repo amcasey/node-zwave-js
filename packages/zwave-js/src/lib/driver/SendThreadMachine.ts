@@ -6,6 +6,7 @@ import {
 	Interpreter,
 	Machine,
 	StateMachine,
+	TransitionsConfig
 } from "xstate";
 import { raise, send } from "xstate/lib/actions";
 import type { CommandClass } from "../commandclass/CommandClass";
@@ -13,19 +14,19 @@ import { messageIsPing } from "../commandclass/NoOperationCC";
 import type { ApplicationCommandRequest } from "../controller/ApplicationCommandRequest";
 import {
 	SendDataMulticastRequest,
-	SendDataRequest,
+	SendDataRequest
 } from "../controller/SendDataMessages";
 import { MessagePriority } from "../message/Constants";
 import type { Message } from "../message/Message";
 import {
 	createSerialAPICommandMachine,
 	SerialAPICommandDoneData,
-	SerialAPICommandEvent,
+	SerialAPICommandEvent
 } from "./SerialAPICommandMachine";
 import {
 	isSerialCommandError,
 	serialAPIOrSendDataErrorToZWaveError,
-	ServiceImplementations,
+	ServiceImplementations
 } from "./StateMachineShared";
 import type { Transaction } from "./Transaction";
 
@@ -74,13 +75,13 @@ export interface SendThreadStateSchema {
 
 export type SendDataErrorData =
 	| (SerialAPICommandDoneData & {
-			type: "failure";
-	  })
+		type: "failure";
+	})
 	| {
-			type: "failure";
-			reason: "node timeout";
-			result?: undefined;
-	  };
+		type: "failure";
+		reason: "node timeout";
+		result?: undefined;
+	};
 
 export interface SendThreadContext {
 	queue: SortedList<Transaction>;
@@ -93,25 +94,25 @@ export interface SendThreadContext {
 
 export type TransactionReducerResult =
 	| {
-			// Silently drop the transaction
-			type: "drop";
-	  }
+		// Silently drop the transaction
+		type: "drop";
+	}
 	| {
-			// Do nothing (useful especially for the current transaction)
-			type: "keep";
-	  }
+		// Do nothing (useful especially for the current transaction)
+		type: "keep";
+	}
 	| {
-			// Reject the transaction with the given error
-			type: "reject";
-			message: string;
-			code: ZWaveErrorCodes;
-	  }
+		// Reject the transaction with the given error
+		type: "reject";
+		message: string;
+		code: ZWaveErrorCodes;
+	}
 	| {
-			// Changes the priority of the transaction if a new one is given,
-			// and moves the current transaction back to the queue
-			type: "requeue";
-			priority?: MessagePriority;
-	  };
+		// Changes the priority of the transaction if a new one is given,
+		// and moves the current transaction back to the queue
+		type: "requeue";
+		priority?: MessagePriority;
+	};
 
 export type TransactionReducer = (
 	transaction: Transaction,
@@ -122,9 +123,9 @@ export type SendThreadEvent =
 	| { type: "add"; transaction: Transaction }
 	| { type: "trigger" | "preTransmitHandshake" }
 	| {
-			type: "nodeUpdate" | "handshakeResponse";
-			message: ApplicationCommandRequest;
-	  }
+		type: "nodeUpdate" | "handshakeResponse";
+		message: ApplicationCommandRequest;
+	}
 	| { type: "unsolicited"; message: Message }
 	| { type: "sortQueue" }
 	| { type: "NIF"; nodeId: number }
@@ -269,14 +270,14 @@ const incrementSendDataAttempts = assign({
 });
 
 const forwardNodeUpdate = send(
-	(_: any, evt: SerialAPICommandEvent & { type: "message" }) => ({
+	(_: SendThreadContext, evt: SerialAPICommandEvent & { message: Message }) => ({
 		type: "nodeUpdate",
 		message: evt.message,
 	}),
 );
 
 const forwardHandshakeResponse = send(
-	(_: any, evt: SerialAPICommandEvent & { type: "message" }) => ({
+	(_: SendThreadContext, evt: SerialAPICommandEvent & { message: Message }) => ({
 		type: "handshakeResponse",
 		message: evt.message,
 	}),
@@ -355,6 +356,77 @@ export function createSendThreadMachine(
 	implementations: ServiceImplementations,
 	initialContext: Partial<SendThreadContext> = {},
 ): SendThreadMachine {
+	const myOn = {
+		add: [
+			// We have control over when pre transmit handshakes are created
+			// so we can trigger them immediately without queuing
+			{
+				cond: "isPreTransmitHandshakeForCurrentTransaction",
+				actions: [
+					assign({
+						preTransmitHandshakeTransaction: (_, evt) =>
+							evt.transaction,
+					}),
+					raise("preTransmitHandshake"),
+				],
+			},
+			{
+				actions: [
+					assign({
+						queue: (ctx, evt) => {
+							ctx.queue.add(evt.transaction);
+							return ctx.queue;
+						},
+					}),
+					raise("trigger"),
+				],
+			},
+		],
+		// The send thread accepts any message as long as the serial API machine is not active.
+		// If it is expected it will be forwarded to the correct states. If not, it
+		// will be returned with the "unsolicited" event.
+		message: [
+			{
+				cond: "isExpectedUpdate",
+				actions: forwardNodeUpdate,
+			},
+			{
+				cond: "isExpectedHandshakeResponse",
+				actions: forwardHandshakeResponse,
+			},
+			{
+				actions: (
+					_: any,
+					evt: SerialAPICommandEvent & { message: Message },
+				) => {
+					implementations.notifyUnsolicited(evt.message);
+				},
+			},
+		],
+		// Do the same if the serial API did not handle a message
+		serialAPIUnexpected: [
+			{
+				cond: "isExpectedUpdate",
+				actions: forwardNodeUpdate,
+			},
+			{
+				cond: "isExpectedHandshakeResponse",
+				actions: forwardHandshakeResponse,
+			},
+			{
+				actions: (
+					_: any,
+					evt: SerialAPICommandEvent & { message: Message },
+				) => {
+					implementations.notifyUnsolicited(evt.message);
+				},
+			},
+		],
+		// Accept external commands to sort the queue
+		sortQueue: {
+			actions: [sortQueue, raise("trigger")],
+		},
+	} as TransitionsConfig<SendThreadContext, SendThreadEvent>;
 	return Machine<SendThreadContext, SendThreadStateSchema, SendThreadEvent>(
 		{
 			id: "SendThread",
@@ -365,77 +437,7 @@ export function createSendThreadMachine(
 				sendDataAttempts: 0,
 				...initialContext,
 			},
-			on: {
-				add: [
-					// We have control over when pre transmit handshakes are created
-					// so we can trigger them immediately without queuing
-					{
-						cond: "isPreTransmitHandshakeForCurrentTransaction",
-						actions: [
-							assign({
-								preTransmitHandshakeTransaction: (_, evt) =>
-									evt.transaction,
-							}),
-							raise("preTransmitHandshake"),
-						],
-					},
-					{
-						actions: [
-							assign({
-								queue: (ctx, evt) => {
-									ctx.queue.add(evt.transaction);
-									return ctx.queue;
-								},
-							}),
-							raise("trigger"),
-						],
-					},
-				],
-				// The send thread accepts any message as long as the serial API machine is not active.
-				// If it is expected it will be forwarded to the correct states. If not, it
-				// will be returned with the "unsolicited" event.
-				message: [
-					{
-						cond: "isExpectedUpdate",
-						actions: forwardNodeUpdate,
-					},
-					{
-						cond: "isExpectedHandshakeResponse",
-						actions: forwardHandshakeResponse,
-					},
-					{
-						actions: (
-							_: any,
-							evt: SerialAPICommandEvent & { type: "message" },
-						) => {
-							implementations.notifyUnsolicited(evt.message);
-						},
-					},
-				],
-				// Do the same if the serial API did not handle a message
-				serialAPIUnexpected: [
-					{
-						cond: "isExpectedUpdate",
-						actions: forwardNodeUpdate,
-					},
-					{
-						cond: "isExpectedHandshakeResponse",
-						actions: forwardHandshakeResponse,
-					},
-					{
-						actions: (
-							_: any,
-							evt: SerialAPICommandEvent & { type: "message" },
-						) => {
-							implementations.notifyUnsolicited(evt.message);
-						},
-					},
-				],
-				// Accept external commands to sort the queue
-				sortQueue: {
-					actions: [sortQueue, raise("trigger")],
-				},
-			},
+			on: myOn,
 			states: {
 				idle: {
 					always: [
@@ -812,7 +814,7 @@ export function createSendThreadMachine(
 				executeSuccessfulExpectsUpdate: (ctx, evt: any) =>
 					evt.data.type === "success" &&
 					ctx.currentTransaction?.message instanceof
-						SendDataRequest &&
+					SendDataRequest &&
 					(ctx.currentTransaction
 						.message as SendDataRequest).command.expectsCCResponse(),
 				isSendData: (ctx) => {
@@ -832,9 +834,9 @@ export function createSendThreadMachine(
 					) &&
 					(ctx.currentTransaction!
 						.message as SendDataRequest).command.isExpectedCCResponse(
-						((evt as any).message as ApplicationCommandRequest)
-							.command,
-					),
+							((evt as any).message as ApplicationCommandRequest)
+								.command,
+						),
 				isPreTransmitHandshakeForCurrentTransaction: (
 					ctx,
 					evt,
@@ -864,9 +866,9 @@ export function createSendThreadMachine(
 					) &&
 					(ctx.preTransmitHandshakeTransaction!
 						.message as SendDataRequest).command.isExpectedCCResponse(
-						((evt as any).message as ApplicationCommandRequest)
-							.command,
-					),
+							((evt as any).message as ApplicationCommandRequest)
+								.command,
+						),
 				queueContainsResponseToHandshakeRequest: (ctx) => {
 					const next = ctx.queue.peekStart();
 					return next?.priority === MessagePriority.Handshake;
